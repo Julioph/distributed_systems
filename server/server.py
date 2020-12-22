@@ -3,7 +3,7 @@
 # TDA596 - Lab 1
 # server/server.py
 # Input: Node_ID total_number_of_ID
-# Student: John Doe
+# Student: Dream Team
 # ------------------------------------------------------------------------------------------------------
 import traceback
 import sys
@@ -11,24 +11,55 @@ import time
 import json
 import argparse
 from threading import Thread, Timer
-from random import randint
+
 from bottle import Bottle, run, request, template
 import requests
+
+
+class Action():
+    def __init__(self, action_str, msg, msg_id, msg_counter = 0):
+        # The action string is one of "ADD", "MODIFY", "DELETE".
+        self.action_str = action_str
+        # The message is:
+        # - For "ADD": The message to be posted to the board.
+        # - For "MODIFY": The new message (after modification).
+        # - For "DELETE": None
+        self.msg = msg
+        # The message ID is an int.
+        self.msg_id = msg_id
+        self.msg_counter = msg_counter
+
+    def __str__(self):
+        return "The action string is: {}, MSG: {}, MSG_ID: {} and the counter is {}".format(self.action_str, self.msg, self.msg_id, self.msg_counter)
+
+def update_counter(given_dict, key, value):
+    success = False
+    try:
+        given_dict[key] = value
+        success = True
+    except Exception as e:
+        print e
+    return success
 
 # ------------------------------------------------------------------------------------------------------
 try:
     app = Bottle()
 
-    #board stores all message on the system
-    board = {0 : "Welcome to Distributed Systems Course"}
+    # This board should be up to date with all other nodes. Every time
+    # the node receives the propagation of some action, this global board
+    # should be updated to reflect that.
+    board = {0: "Welcome to Distributed Systems Course"}
+    local_board = {}
+    message_counter = {}
 
-    # Indicates whether this node has received a take-over message
-    # during an election.
-    taken_over = False
-    in_election = False
-    # We need to define these timers at the start, since we might
-    # want to cancel them before they've been properly defined.
-    take_over_timer = Timer(1, lambda: None)
+    # This is a queue of delete/modify actions posted at this node.
+    # Whenever this node receives the mutex token, it will propagate
+    # the action to all other nodes.
+    action_queue = []
+
+    # Queue for actions that do not have an applicable ID yet
+    unmatched_queue = []
+
 
     # ------------------------------------------------------------------------------------------------------
     # BOARD FUNCTIONS
@@ -47,6 +78,17 @@ try:
             print e
         return success
 
+    def add_new_element_to_local_store(entry_sequence, element):
+        global local_board
+        success = False
+        try:
+            if entry_sequence not in local_board:
+                local_board[entry_sequence] = element
+                success = True
+        except Exception as e:
+            print e
+        return success
+
     def modify_element_in_store(entry_sequence, modified_element, is_propagated_call = False):
         global board
         success = False
@@ -58,42 +100,53 @@ try:
             print e
         return success
 
-    def delete_element_from_store(entry_sequence, is_propagated_call = False):
-        global board
+    def modify_local_element_in_store(entry_sequence, modified_element):
+        global local_board
         success = False
         try:
-            if entry_sequence in board:
-                del board[entry_sequence]
+            if entry_sequence in local_board:
+                local_board[entry_sequence] = modified_element
                 success = True
         except Exception as e:
             print e
         return success
 
-    def set_leader(ip):
-        """Set the leader and end the election for this node."""
-        global leader, taken_over, in_election
-        print "LEADER IS SET"
-        print "Leader before: {}".format(leader)
-        leader = ip
-        print "Leader after: {}".format(leader)
-        taken_over = False
-        in_election = False
+    def delete_element_from_store(entry_sequence, is_propagated_call = False):
+        global board, message_counter
+        success = False
+        try:
+            if entry_sequence in board:
+                del board[entry_sequence]
+                message_counter[entry_sequence] = -1
+                success = True
+        except Exception as e:
+            print e
+        return success
+
+    def delete_element_from_local_store(entry_sequence, is_propagated_call = False):
+        global local_board
+        success = False
+        try:
+            if entry_sequence in local_board:
+                del local_board[entry_sequence]
+                success = True
+        except Exception as e:
+            print e
+        return success
 
     # ------------------------------------------------------------------------------------------------------
     # ROUTES
     # ------------------------------------------------------------------------------------------------------
     # a single example (index) for get, and one for post
     # ------------------------------------------------------------------------------------------------------
-    #No need to modify this
-
     @app.route('/')
     def index():
-        global board, node_id, timeout
+        global board, node_id
         return template('server/index.tpl',
                         board_title='Vessel {}'.format(node_id),
-                        board_dict=sorted({"0": board,}.iteritems()),
+                        board_dict=sorted(board.iteritems()),
                         members_name_string='Thomas, Julio, Mihkel',
-                        leader=leader)
+                        local_dict=[])
 
     @app.get('/board')
     def get_board():
@@ -101,8 +154,8 @@ try:
         print board
         return template('server/boardcontents_template.tpl',
                         board_title='Vessel {}'.format(node_id),
-                        board_dict=sorted(board.iteritems()),
-                        leader=leader)
+                        board_dict = sorted(board.iteritems()),
+                        local_dict = sorted(local_board.iteritems()))
 
     #------------------------------------------------------------------------------------------------------
 
@@ -111,41 +164,58 @@ try:
     def client_add_received():
         '''Adds a new element to the board
         Called directly when a user is doing a POST request on /board'''
-        global board, node_id, leader
-        try:
-            new_entry = request.forms.get('entry')
+        global board, node_id, my_token, local_board
+        if my_token is not None:
+            try:
+                new_entry = request.forms.get('entry')
 
-            # Forward the ADD action to the leader, if we are not the leader.
-            if int(leader[-1]) != node_id:
-                thread = Thread(target=contact_vessel,
-                                args=(leader, "/board", {"entry": new_entry}, "POST"))
+                element_id = my_token["last_msg_id"]
+                my_token["last_msg_id"] += 1
+
+                add_new_element_to_store(element_id, new_entry)
+
+                # Propagate action to all other nodes example :
+                thread = Thread(target=propagate_to_vessels,
+                                args=('/propagate/ADD/' + str(element_id), {'entry': new_entry}, 'POST'))
                 thread.daemon = True
                 thread.start()
                 return True
+            except Exception as e:
+                print (e, "here")
+        else:
+            new_entry = request.forms.get('entry')
 
-            # Otherwise, we must be the leader, so we perform the usual actions.
-
-            if len(board.keys()) == 0:
+            if len(local_board.keys()) == 0:
                 element_id = 0
             else:
-                element_id = list(board.keys())[-1] + 1 # you need to generate a entry number
-            add_new_element_to_store(element_id, new_entry)
+                element_id = list(local_board.keys())[-1] + 1
 
-            # Propagate action to all other nodes example :
-            thread = Thread(target=propagate_to_vessels,
-                            args=('/propagate/ADD/' + str(element_id),
-                                  {'entry': new_entry},
-                                  'POST'))
-            thread.daemon = True
-            thread.start()
-            return True
-        except Exception as e:
-            print (e)
+            add_new_element_to_local_store(element_id, new_entry)
+
         return False
 
-    @app.post('/board/<element_id:int>')
+    @app.post('/board/local/<element_id:int>/')
+    def client_local_action_received(element_id):
+
+        print "You receive a local element action"
+        print "id is ", node_id
+        # Get the entry from the HTTP body
+        entry = request.forms.get('entry')
+
+        delete_option = request.forms.get('delete')
+        #0 = modify, 1 = delete
+
+        print "the delete option is ", delete_option
+
+        #call either delete or modify
+        if int(delete_option) == 0:
+            modify_local_element_in_store(element_id, entry)
+        elif int(delete_option) == 1:
+            delete_element_from_local_store(element_id, False)
+
+    @app.post('/board/<element_id:int>/')
     def client_action_received(element_id):
-        global board, node_id, leader
+        global board, node_id, action_queue, message_counter
 
         print "You receive an element"
         print "id is ", node_id
@@ -153,45 +223,28 @@ try:
         entry = request.forms.get('entry')
 
         delete_option = request.forms.get('delete')
+        #0 = modify, 1 = delete
 
         print "the delete option is ", delete_option
 
-        # If we are not the leader, forward the action to the leader.
-        if int(leader[-1]) != node_id:
-            print("action to leader")
-            thread = Thread(target=contact_vessel,
-                            args=(leader,
-                                  "/board/{}".format(element_id),
-                                  {"entry": entry, "delete": delete_option},
-                                  "POST"))
-            thread.daemon = True
-            thread.start()
-            return True
-
-        # Otherwise, if we are the leader, business as usual.
-
-        # 0 = modify, 1 = delete
+        #call either delete or modify
         if int(delete_option) == 0:
             modify_element_in_store(element_id, entry, False)
             action_str = 'MODIFY'
+            action_queue.append(Action(action_str, entry, element_id))
+            update_counter(message_counter, element_id, float('inf'))
+
         elif int(delete_option) == 1:
             delete_element_from_store(element_id, False)
             action_str = 'DELETE'
-
-        # Propagate to other nodes
-        thread = Thread(target=propagate_to_vessels,
-                        args=('/propagate/' + action_str + '/' + str(element_id),
-                              {'entry': entry},
-                              'POST'))
-        thread.daemon = True
-        thread.start()
+            action_queue.append(Action(action_str, None, element_id))
 
     #With this function you handle requests from other nodes like add modify or delete
     @app.post('/propagate/<action>/<element_id:int>')
     def propagation_received(action, element_id):
-        global taken_over, vessel_list, node_id, in_election
+        global my_token, local_board, message_counter, board, action_queue
 
-        # Get entry from http body
+        #get entry from http body
         entry = request.forms.get('entry')
         print "the action is", action
 
@@ -201,120 +254,161 @@ try:
 
         # Modify the board entry
         elif action == "MODIFY":
-            modify_element_in_store(element_id, entry, True)
+            modification_counter = int(request.forms.get("modification_counter"))
+            print("entry: {}".format(entry))
+            print("modification_counter: {}".format(modification_counter))
+            if element_id not in board:
+                # If we receive a modification action for a message we don't yet
+                # have on this node, we add the action to a queue, (unmatched_queue)
+                # and we handle it later.
+                # But we need to check the message counter for the message;
+                # in the case that the message has been deleted from the
+                # board (the message counter is -1), we don't want to
+                # add it to the unmatched_queue, since it can never get handled.
+                if element_id in message_counter:
+                    if message_counter[element_id] >= 0:
+                        action = Action(action, entry, element_id, modification_counter)
+                        unmatched_queue.append(action)
+                else:
+                    action = Action(action, entry, element_id, modification_counter)
+                    unmatched_queue.append(action)
+            else:
+                if element_id in message_counter:
+                    if modification_counter > message_counter[element_id]:
+                        message_counter[element_id] = modification_counter
+                        # Only if this modification is newer than the one we have
+                        # our in store, we should update our entry:
+                        modify_element_in_store(element_id, entry, True)
+                else:
+                    # If the message has no counter yet, we can safely modify it
+                    # and set its message counter.
+                    message_counter[element_id] = modification_counter
+                    modify_element_in_store(element_id, entry, True)
 
         # Delete the entry from the board
         elif action == "DELETE":
-            delete_element_from_store(element_id, True)
+            # If the element is not on the board and has not been deleted before we add
+            # a deletion action to the unmatched queue
+            if element_id not in board and element_id not in message_counter:
+                action = Action(action, entry, element_id, None)
+                unmatched_queue.append(action)
+            # If the element exists, we delete it
+            else:
+                delete_element_from_store(element_id, True)
 
-        # Received from the new leader to announce the new leadership.
-        elif action == "COORDINATOR":
-            set_leader(vessel_list[str(element_id)])
+        elif action == "TOKEN":
+            last_msg = int(request.forms.get("last_msg_id"))
+            print("Received token, last_msg_id is: {}".format(last_msg))
+            mod_c = int(request.forms.get("modification_counter"))
+            my_token = {"last_msg_id": last_msg, "modification_counter": mod_c}
 
-        # Received from lower ID nodes during an election.
-        elif action == "ELECTION":
-            print "n: {}, sender: {}".format(entry, element_id)
-            in_election = True
-            # Send the take-over message back
-            sender = element_id
-            try:
-                thread = Thread(target=contact_vessel,
-                                args=(vessel_list[str(sender)],
-                                      "/propagate/TAKEOVER/" + str(node_id),
-                                      "POST"))
-                thread.daemon = True
-                thread.start()
+            if len(action_queue) == 0 and len(local_board.keys()) == 0:
+                # Pass the token forward after a set amount of time if no work is queued.
+                token_timer = Timer(0.1, forward_token)
+                token_timer.start()
+            else:
+                # If we have local changes that need to be propagated to other nodes,
+                # we want to:
+                # 1) Add messages from local_board to the global board, ensuring
+                #    no collisions with message IDs.
+                # 2) Perform queued actions in the action_queue.
+                # 3) Call forward_token once we finish.
+                last_id = my_token["last_msg_id"]
+                for local_key in local_board.keys():
+                    local_msg = local_board[local_key]
 
-            except Exception as e:
-                pass
+                    # Transfer message from local_board to board.
+                    add_new_element_to_store(last_id, local_msg)
+                    # Delete it from local after transfer
+                    del local_board[local_key]
 
-            if not taken_over:
-                print("Continue bullying")
-                bully()
+                    # Propagate this message to other nodes.
+                    thread = Thread(target=propagate_to_vessels,
+                                    args=('/propagate/ADD/' + str(last_id),
+                                          {'entry': local_msg},
+                                          'POST'))
+                    thread.daemon = True
+                    thread.start()
+                    # Ensure the next addition can use a unique message ID.
+                    last_id += 1
 
-        elif action == "TAKEOVER":
-            # Received take-over response, we just wait for the new leader
-            # to announce its election.
-            print("Received takeover")
-            taken_over = True
+                # Update the token with the next unique message ID.
+                my_token["last_msg_id"] = last_id
+
+                for action in action_queue:
+                    print(action)
+                    mod_counter = my_token["modification_counter"]
+                    if action.action_str == "MODIFY":
+                        update_counter(message_counter, action.msg_id, my_token["modification_counter"])
+                        my_token["modification_counter"] += 1
+                    thread = Thread(target=propagate_to_vessels,
+                                    args=('/propagate/' + str(action.action_str) + '/' + str(action.msg_id),
+                                          {'entry': action.msg,
+                                           'modification_counter': mod_counter},
+                                          'POST'))
+                    thread.daemon = True
+                    thread.start()
+
+                # Empty the queue after we've propagated all the actions.
+                action_queue = []
+
+                forward_token()
 
 
     # ------------------------------------------------------------------------------------------------------
     # DISTRIBUTED COMMUNICATIONS FUNCTIONS
     # ------------------------------------------------------------------------------------------------------
     def contact_vessel(vessel_ip, path, payload=None, req='POST'):
-        """Try to contact another server (vessel) through a POST or GET, once.
-
-        This function has built-in behaviour of starting an election if
-        the leader failed to be contacted.
-        """
-        global in_election
+        # Try to contact another server (vessel) through a POST or GET, once
         success = False
         try:
-            print('CONTACTING PATH: http://{}{}'.format(vessel_ip, path))
             if 'POST' in req:
                 res = requests.post('http://{}{}'.format(vessel_ip, path), data=payload)
             elif 'GET' in req:
                 res = requests.get('http://{}{}'.format(vessel_ip, path))
             else:
                 print 'Non implemented feature!'
+            print(res)
             if res.status_code == 200:
                 success = True
         except Exception as e:
-            # We can not contact the current leader with a non-election request so we start new elections
-            if vessel_ip == leader and 'ELECTION' not in path and not in_election:
-                in_election = True
-                bully()
             print e
         return success
 
     def propagate_to_vessels(path, payload = None, req = 'POST'):
-        global vessel_list, node_id, leader
+        global vessel_list, node_id
 
         for vessel_id, vessel_ip in vessel_list.items():
-            if int(vessel_id) != node_id: # don't propagate to yourself
+            if vessel_id != node_id: # don't propagate to yourself
                 success = contact_vessel(vessel_ip, path, payload, req)
                 if not success:
-                    print "Could not contact vessel {}\n".format(vessel_ip)
+                    print "\n\nCould not contact vessel {}\n\n".format(vessel_id)
 
-    def declare_itself_leader():
-        # Set itself as the new leader, and propagate it to all other nodes
-        global node_id, vessel_list
-        propagate_to_vessels("/propagate/COORDINATOR/" + str(node_id))
-        set_leader(vessel_list[str(node_id)])
 
-    def bully():
-        # Run the bully algorithm for one node
-        global vessel_list, leader, node_id, taken_over, take_over_timer
-
-        # Send the election message to all nodes with a higher ID.
-        for n in sorted(vessel_list.keys())[node_id:]:
-            print "Contact {} ({}) for election. PATH: {}".format(n, vessel_list[n], "/propagate/ELECTION/"+str(node_id))
+    # Token related functions
+    def forward_token():
+        global my_token
+        print("forwarding token: {}".format(my_token))
+        """Send the token to the next node in the ring."""
+        if my_token is None:
+            raise Exception("Node {} does not currently hold the token".format(node_id))
+        else:
+            print("Sending token to: Node {}".format(next_id))
             thread = Thread(target=contact_vessel,
-                            args=(vessel_list[n],
-                                  "/propagate/ELECTION/" + str(node_id),
-                                  'POST'))
+                            args=(vessel_list[next_id],
+                                  "/propagate/TOKEN/0",  # Dummy element_id to fit format
+                                  {"last_msg_id": my_token["last_msg_id"],
+                                   "modification_counter": my_token["modification_counter"]},
+                                  "POST"))
             thread.daemon = True
             thread.start()
-
-        # After a timer we check if we are the new leader; if we are, we
-        # announce that to all other nodes.
-        def check_if_leader():
-            global taken_over
-            if taken_over:
-                return 1
-            elif in_election and not taken_over:
-                declare_itself_leader()
-
-        take_over_timer.cancel()
-        take_over_timer = Timer(3, check_if_leader)
-        take_over_timer.start()
+            my_token = None
 
     # ------------------------------------------------------------------------------------------------------
     # EXECUTION
     # ------------------------------------------------------------------------------------------------------
     def main():
-        global vessel_list, node_id, app, leader
+        global vessel_list, node_id, app, my_token, next_id
 
         port = 80
         parser = argparse.ArgumentParser(description='Your own implementation of the distributed blackboard')
@@ -324,14 +418,45 @@ try:
         node_id = args.nid
         vessel_list = dict()
         # We need to write the other vessels IP, based on the knowledge of their number
-        for i in range(1, args.nbv+1):
-            vessel_list[str(i)] = '10.1.0.{}'.format(str(i))
+        for i in range(1, args.nbv + 1):
+            vessel_list[i] = "10.1.0.{}".format(i)
 
-        # Pick an arbitrary node to be the initial leader.
-        leader = vessel_list.values()[0]
+        #
+        # Set up token ring stuff.
+        #
+        node_ids = sorted(vessel_list.keys())
+        if node_ids.index(node_id) == len(node_ids) - 1:
+            # If we are the last node in the list, the next node will be the
+            # first one in the list.
+            next_id = node_ids[0]
+        else:
+            # Otherwise, the next node is simply the next one in the list
+            next_id = node_ids[node_ids.index(node_id) + 1]
+        print("Next node in token ring: {}".format(next_id))
 
+        # The first node in the node list should be the initial token carrier.
+        if node_ids[0] == node_id:
+            # The token is a dictionary containing the following fields:
+            # - last_msg_id: The message ID of the latest message on the global board,
+            #                as far as the token bearer knows.
+            # - modification_counter: This counter is needed to determine
+            #                         priority when multiple nodes want
+            #                         to modify the same message.
+            my_token = {"last_msg_id": 1, "modification_counter": 0}
+        else:
+            my_token = None
+        print('has token', my_token is not None)
+
+        #
+        # Start the node.
+        #
         try:
-            run(app, host=vessel_list[str(node_id)], port=port)
+            if my_token is not None:
+                # The initial token carrier must start the token forwarding process.
+                token_timer = Timer(10, forward_token)
+                token_timer.start()
+
+            run(app, host=vessel_list[node_id], port=port)
         except Exception as e:
             print e
     # ------------------------------------------------------------------------------------------------------
