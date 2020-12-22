@@ -17,9 +17,10 @@ var page_reload_count = 0;
 
 function update_contents(){
     page_reload_count += 1;
-    $("#boardcontents_placeholder").load("/board #boardcontents_placeholder", function (data, status) {
+    $("#vote_result_placeholder").load("/vote/result", function (data, status) {
         //alert("Data: " + data + "\nStatus: " + status);
-        $("#boardcontents_status_placeholder").text(page_reload_count + ": " + status);
+        $("#vote_result_placeholder").text(data)
+    	$("#boardcontents_status_placeholder").text(page_reload_count + ": " + status);
     });
 }
 
@@ -45,18 +46,18 @@ $(document).ready(function () {
 <style>
 .status {
     color: red;
-    font-size: 75%; 
+    font-size: 75%;
 }
 
 .entry_title {
-    margin: 2px 0px 0px 0px;      
+    margin: 2px 0px 0px 0px;
     color: blue;
     font-size: 110%;
     font-weight: bold;
 }
 
 .entryform {
-    margin: 2px 0px 0px 0px;      
+    margin: 2px 0px 0px 0px;
     color: blue;
 }
 
@@ -74,18 +75,18 @@ $(document).ready(function () {
 
 footer {
     margin: 10px 0px 0px 0px;
-    font-size: 75%; 
+    font-size: 75%;
     color: gray;
 }
 
 #boardcontents_placeholder {
-    margin: 10px 0px 0px 0px;      
+    margin: 10px 0px 0px 0px;
     border: 1px dotted green;
 }
 
 #boardtitle_placeholder {
     font-size: 125%;
-    font-weight: bold; 
+    font-weight: bold;
 }
 </style>
     <title>Distributed board - TDA596 (Chalmers)</title>
@@ -93,22 +94,30 @@ footer {
 <body>
     <!-- this place will show a count down for the automatic reload of the board contents, downloaded periodically from the server using the javascript function reload_countdown. -->
     <div id="countdown_placeholder"></div>
-    <!-- this place will show the actual contents of the blackboard. 
+    <!-- this place will show the actual contents of the blackboard.
     It will be reloaded automatically from the server -->
-    <!-- This place shows the status of the auto-reload. 
+    <!-- This place shows the status of the auto-reload.
     An error shown here means the server is not responding -->
     <div id="boardcontents_status_placeholder">0: success</div>
 
-    <!-- This is a target for forms to prevent reloading the page on form submit. We handle the update in the script instead. USE style="display:none" to hide it -->   
-    <iframe style="display: none" name="noreload-form-target" width="90%" height="50" src="about:blank" frameborder="0" scrolling="yes" resizable seamless></iframe>
+    <!-- This is a target for forms to prevent reloading the page on form submit. We handle the update in the script instead. USE style="display:none" to hide it -->
+    <iframe name="noreload-form-target" width="90%" height="50" src="about:blank" frameborder="0" scrolling="yes" resizable seamless></iframe>
 
-    <!-- This place shows the text box used to enter data to the blackboard by posting a request to the server -->
-    <div id="board_form_placeholder">
-        <h3>Submit to board</h3>
-        <form id="usrform" target="noreload-form-target">
-            <input type="text" name="entry" size="100%" autofocus required />
-            <input type="submit" formmethod="post" formaction="board" value="Submit to board"/>
-        </form>
+    <!-- This place shows the buttons used to request a vote -->
+     <div id="vote_form_placeholder">
+      <h3>Vote</h3>
+      <form id="usrform" target="noreload-form-target">
+        <input type="submit" formmethod="post" formaction="/vote/attack" value="Attack" />
+        <input type="submit" formmethod="post" formaction="/vote/retreat" value="Retreat" />
+        <input type="submit" formmethod="post" formaction="/vote/byzantine" value="Byzantine" />
+      </form>
     </div>
 
-    <!-- The board contents come here -->  
+    <h3>Result</h3>
+    <button onclick="update_contents();">Refresh Vote Result</button>
+
+    <div id="vote_result_placeholder">
+    <pre>Voting Results ... </pre>
+    </div>
+
+
